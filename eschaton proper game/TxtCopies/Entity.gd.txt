@@ -1,0 +1,185 @@
+extends Area2D
+
+## Entity properties
+var entity_name: String = "Entity"
+var is_player: bool = false
+var hp: int = 4
+var max_hp: int = 4
+var ap: int = 2
+var max_ap: int = 2
+var grid_pos: Vector2 = Vector2.ZERO
+var entity_color: Color = Color.RED
+var variant: String = "GRUNT" # "GRUNT", "AEGIS", or "FROST"
+
+var active_statuses: Dictionary = {}
+
+const CELL_SIZE: int = 64
+var grid_offset: Vector2 = Vector2(40, 64)
+
+@onready var color_rect: ColorRect = $ColorRect
+@onready var hp_label: Label = $HPLabel
+
+func _ready() -> void:
+	if color_rect:
+		color_rect.visible = false
+	update_visuals()
+
+func setup(p_name: String, p_is_player: bool, p_hp: int, p_max_hp: int, p_ap: int, p_max_ap: int, p_color: Color, p_grid_pos: Vector2, p_variant: String = "GRUNT") -> void:
+	entity_name = p_name
+	is_player = p_is_player
+	hp = p_hp
+	max_hp = p_max_hp
+	ap = p_ap
+	max_ap = p_max_ap
+	entity_color = p_color
+	grid_pos = p_grid_pos
+	variant = p_variant
+	position = Vector2(grid_pos.x * CELL_SIZE, grid_pos.y * CELL_SIZE)
+	update_visuals()
+
+func update_visuals() -> void:
+	if hp_label:
+		hp_label.text = str(hp) + "HP"
+	queue_redraw()
+
+func _draw() -> void:
+	var center = Vector2(CELL_SIZE / 2.0, CELL_SIZE / 2.0)
+	
+	if is_player:
+		# Player: Diamond
+		var points = PackedVector2Array([
+			Vector2(center.x, 4),
+			Vector2(CELL_SIZE - 4, center.y),
+			Vector2(center.x, CELL_SIZE - 4),
+			Vector2(4, center.y)
+		])
+		draw_polygon(points, PackedColorArray([entity_color]))
+		points.append(points[0]) # Close the loop
+		draw_polyline(points, Color.WHITE, 3.0)
+	else:
+		if variant == "GRUNT":
+			# Enemy Grunt: Circle
+			draw_circle(center, 24.0, entity_color)
+			draw_arc(center, 24.0, 0, TAU, 32, Color.BLACK, 2.0)
+		elif variant == "AEGIS":
+			# Enemy Aegis: Square
+			var rect = Rect2(8, 8, CELL_SIZE - 16, CELL_SIZE - 16)
+			draw_rect(rect, entity_color)
+			draw_rect(rect, Color.BLACK, false, 4.0)
+		elif variant == "FROST":
+			# Enemy Frost: Triangle
+			var points = PackedVector2Array([
+				Vector2(center.x, 8),
+				Vector2(CELL_SIZE - 8, CELL_SIZE - 8),
+				Vector2(8, CELL_SIZE - 8)
+			])
+			draw_polygon(points, PackedColorArray([entity_color]))
+			points.append(points[0]) # Close the loop
+			draw_polyline(points, Color.BLACK, 2.0)
+			
+	# Status Indicator Drawing
+	var indicator_pos = Vector2(center.x, center.y - 20)
+	if active_statuses.has("BURN"):
+		draw_circle(indicator_pos, 6.0, Color.ORANGE)
+		draw_arc(indicator_pos, 6.0, 0, TAU, 16, Color.RED, 1.5)
+	if active_statuses.has("FREEZE"):
+		var freeze_pos = indicator_pos if not active_statuses.has("BURN") else Vector2(center.x + 12, center.y - 20)
+		var f_points = PackedVector2Array([
+			Vector2(freeze_pos.x, freeze_pos.y - 6),
+			Vector2(freeze_pos.x + 6, freeze_pos.y),
+			Vector2(freeze_pos.x, freeze_pos.y + 6),
+			Vector2(freeze_pos.x - 6, freeze_pos.y)
+		])
+		draw_polygon(f_points, PackedColorArray([Color.CYAN]))
+		f_points.append(f_points[0])
+		draw_polyline(f_points, Color.WHITE, 1.5)
+
+func _flash_color(color: Color, duration: float) -> void:
+	var original_color := entity_color
+	entity_color = color
+	queue_redraw()
+	await get_tree().create_timer(duration).timeout
+	entity_color = original_color
+	queue_redraw()
+
+func apply_status(type: String, duration: int) -> void:
+	if type == "BURN" and variant == "AEGIS":
+		if hp_label: hp_label.text = "RESIST"
+		_flash_color(Color(1.0, 0.6, 0.0), 0.15)
+		return
+	if type == "FREEZE" and variant == "FROST":
+		if hp_label: hp_label.text = "RESIST"
+		_flash_color(Color(0.0, 0.85, 0.85), 0.15)
+		return
+		
+	active_statuses[type] = active_statuses.get(type, 0) + duration
+	queue_redraw()
+
+func process_status_effects(telemetry: Dictionary = {}) -> void:
+	if active_statuses.has("BURN"):
+		take_damage(1, "BURN")
+		_flash_color(Color.ORANGE, 0.15)
+		active_statuses["BURN"] -= 1
+		
+		if not is_player and telemetry.has("burn_damage_dealt"):
+			telemetry["burn_damage_dealt"] += 1
+			
+		if active_statuses["BURN"] <= 0:
+			active_statuses.erase("BURN")
+			
+	# Check if alive after burn
+	if hp <= 0:
+		return
+			
+	if active_statuses.has("FREEZE"):
+		ap = maxi(1, ap - 1)
+		_flash_color(Color.CYAN, 0.15)
+		active_statuses["FREEZE"] -= 1
+		
+		if not is_player and telemetry.has("turns_enemies_frozen"):
+			telemetry["turns_enemies_frozen"] += 1
+			
+		if active_statuses["FREEZE"] <= 0:
+			active_statuses.erase("FREEZE")
+			
+	queue_redraw()
+
+func move_to_grid(x: int, y: int) -> void:
+	grid_pos = Vector2(x, y)
+	var target_pixel := Vector2(x * CELL_SIZE, y * CELL_SIZE) + grid_offset
+	var tween := create_tween()
+	tween.tween_property(self , "position", target_pixel, 0.15).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+
+func take_damage(amount: int, damage_type: String = "MELEE") -> void:
+	# --- Resistance checks ---
+	if not is_player:
+		if variant == "AEGIS" and damage_type == "THERMAL":
+			# Thermal-Resistant — takes 0 damage from THERMAL_LASER
+			if hp_label:
+				hp_label.text = "RESIST"
+			var original_color := entity_color
+			entity_color = Color(1.0, 0.6, 0.0) # flash orange
+			queue_redraw()
+			await get_tree().create_timer(0.15).timeout
+			entity_color = original_color
+			queue_redraw()
+			if hp_label:
+				hp_label.text = str(hp) + "HP"
+			return
+		if variant == "FROST" and damage_type == "CRYO":
+			# Cryo-Resistant — takes 0 damage from CRYO_BOMB
+			if hp_label:
+				hp_label.text = "RESIST"
+			_flash_color(Color(0.0, 0.85, 0.85), 0.15)
+			if hp_label:
+				hp_label.text = str(hp) + "HP"
+			return
+
+	hp -= amount
+	update_visuals()
+	# Flash white
+	_flash_color(Color.WHITE, 0.1)
+
+func heal(amount: int) -> void:
+	hp = mini(hp + amount, max_hp)
+	update_visuals()

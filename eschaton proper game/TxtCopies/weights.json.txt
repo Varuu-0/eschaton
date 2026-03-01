@@ -1,0 +1,12 @@
+{
+  "aggression": 1.0,
+  "cowardice": 0.0,
+  "flanking": 0.5,
+  "cover_density": 0.2,
+  "hazard_density": 0.1,
+  "spawn_rates": {
+    "GRUNT": 0.8,
+    "AEGIS": 0.1,
+    "FROST": 0.1
+  }
+}

@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://vfx001"]
+
+[ext_resource type="Script" path="res://VFX.gd" id="1"]
+
+[node name="VFX" type="Node2D"]
+script = ExtResource("1")

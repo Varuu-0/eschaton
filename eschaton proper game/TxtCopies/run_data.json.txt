@@ -1,0 +1,9 @@
+{
+  "avg_distance_from_enemies": 4.22222222222222,
+  "cryo_attacks_used": 2,
+  "glitches_used": 1,
+  "result": "Win",
+  "thermal_attacks_used": 1,
+  "total_attacks": 5,
+  "total_moves": 7
+}
