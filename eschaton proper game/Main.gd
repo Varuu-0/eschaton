@@ -1,9 +1,6 @@
 extends Node2D
 
 const SDB = preload("res://SkillDB.gd")
-const MainSpawn = preload("res://MainSpawn.gd")
-const MainEnemyAI = preload("res://MainEnemyAI.gd")
-const MainTelemetry = preload("res://MainTelemetry.gd")
 
 # ============================================================
 # ESCHATON — Main Game Engine (Godot 4 Port)
@@ -192,26 +189,87 @@ func _draw() -> void:
 # ============================================================
 
 func _load_weights() -> void:
-	MainTelemetry.load_weights(self)
+	var file := FileAccess.open("res://weights.json", FileAccess.READ)
+	if file:
+		var json := JSON.new()
+		var err := json.parse(file.get_as_text())
+		if err == OK:
+			weights = json.data
+			_add_log("Loaded weights.json")
+		else:
+			_add_log("Failed to parse weights.json, using defaults")
+		file.close()
+	else:
+		_add_log("Failed to load weights.json, using defaults")
 
 # ============================================================
 # SPAWNING
 # ============================================================
 
 func _spawn_entities() -> void:
-	MainSpawn.spawn_entities(self)
+	# Player — always spawns at bottom-center area
+	_spawn_entity("Player", true, 10, 10, 3, 3, Color(1.5, 3.0, 5.0), Vector2(5, 9), "GRUNT")
+	update_fog(Vector2(5, 9))
+	_spawn_enemies()
+	var p = _get_player()
+	if p:
+		print("Total entities: ", entities.size(), " Player spawned at: ", p.grid_pos)
 
 func _spawn_enemies() -> void:
-	MainSpawn.spawn_enemies(self)
+	# --- Adaptive Enemy Spawning (Sprint 12) ---
+	var spawn_rates: Dictionary = weights.get("spawn_rates", {"GRUNT": 0.8, "AEGIS": 0.1, "FROST": 0.1})
+
+	# Collect valid spawn tiles: top half (rows 0-4), non-wall, non-hazard
+	var valid_tiles: Array[Vector2] = []
+	for x in range(GRID_SIZE):
+		for y in range(5): # rows 0-4 = top half
+			var pos := Vector2(x, y)
+			if not _is_wall(pos) and not _is_hazard(pos):
+				valid_tiles.append(pos)
+
+	# Shuffle valid tiles for random placement
+	valid_tiles.shuffle()
+
+	# Sprint 13: Scale Enemy HP
+	var enemy_hp: int = 4 + (current_floor - 1)
+
+	# Spawn exactly 4 enemies
+	var enemy_count: int = mini(4, valid_tiles.size())
+	for i in range(enemy_count):
+		var v: String = _pick_variant(spawn_rates)
+		var color: Color = _variant_color(v)
+		var pos: Vector2 = valid_tiles[i]
+		var ename: String = v + " " + str(i + 1)
+		_spawn_entity(ename, false, enemy_hp, enemy_hp, 2, 2, color, pos, v)
 
 func _pick_variant(rates: Dictionary) -> String:
-	return MainSpawn.pick_variant(rates)
+	## Weighted random selection of enemy variant.
+	var grunt_r: float = rates.get("GRUNT", 0.8)
+	var aegis_r: float = rates.get("AEGIS", 0.1)
+	# FROST gets the remainder
+	var roll: float = randf()
+	if roll < grunt_r:
+		return "GRUNT"
+	elif roll < grunt_r + aegis_r:
+		return "AEGIS"
+	else:
+		return "FROST"
 
 func _variant_color(v: String) -> Color:
-	return MainSpawn.variant_color(v)
+	match v:
+		"AEGIS":
+			return Color(3.0, 1.8, 0.0) # Bright orange glow
+		"FROST":
+			return Color(0.0, 2.55, 2.55) # Bright cyan glow
+		_:
+			return Color(3.0, 0.5, 0.5) # Super bright Red (GRUNT)
 
 func _spawn_entity(p_name: String, p_is_player: bool, p_hp: int, p_max_hp: int, p_ap: int, p_max_ap: int, p_color: Color, p_grid_pos: Vector2, p_variant: String = "GRUNT") -> void:
-	MainSpawn.spawn_entity(self, p_name, p_is_player, p_hp, p_max_hp, p_ap, p_max_ap, p_color, p_grid_pos, p_variant)
+	var instance = entity_scene.instantiate()
+	world_node.add_child(instance)
+	instance.setup(p_name, p_is_player, p_hp, p_max_hp, p_ap, p_max_ap, p_color, p_grid_pos, p_variant)
+	instance.position += grid_offset
+	entities.append(instance)
 
 # ============================================================
 # INPUT HANDLING
@@ -631,17 +689,163 @@ func _start_enemy_turn() -> void:
 	enemy_turn_active = false
 
 func _execute_enemy_turn() -> void:
-	await MainEnemyAI.execute_turn(self)
+	if game_over != "":
+		return
+
+	var player = _get_player()
+	if player == null:
+		return
+
+	# Process each enemy one at a time
+	var processing := true
+	while processing:
+		await get_tree().create_timer(0.3).timeout
+
+		if game_over != "":
+			break
+
+		player = _get_player()
+		if player == null:
+			break
+
+		# Find an enemy with AP > 0
+		var active_enemy = null
+		for e in entities:
+			if not e.is_player and e.hp > 0 and e.ap > 0:
+				active_enemy = e
+				break
+
+		if active_enemy == null:
+			# All enemies have moved — end enemy turn
+			_add_log("Enemy turn ended.")
+			_apply_hazard_damage()
+			current_turn = "PLAYER"
+			# Reset player AP
+			player = _get_player()
+			if player:
+				player.ap = player.max_ap
+				player.process_status_effects(telemetry)
+			glitch_cooldown = maxi(0, glitch_cooldown - 1)
+			_update_ui()
+			processing = false
+			break
+
+		# Check if adjacent to player — attack!
+		var dist_to_player := _manhattan(active_enemy.grid_pos, player.grid_pos)
+		if dist_to_player == 1:
+			player.take_damage(1, "MELEE")
+			active_enemy.ap -= 1
+			_add_log(active_enemy.entity_name + " attacked Player for 1 damage.")
+			_remove_dead()
+			_check_game_over()
+			_update_ui()
+			continue
+
+		# Utility AI: Evaluate 4 adjacent tiles
+		var dirs: Array[Vector2] = [Vector2(0, -1), Vector2(0, 1), Vector2(-1, 0), Vector2(1, 0)]
+		var best_score: float = - INF
+		var best_pos: Vector2 = active_enemy.grid_pos
+
+		var other_enemies: Array = []
+		for e in entities:
+			if not e.is_player and e.hp > 0 and e != active_enemy:
+				other_enemies.append(e)
+
+		var aggression_val: float = weights.get("aggression", 0.5)
+
+		for d in dirs:
+			var nx: int = int(active_enemy.grid_pos.x + d.x)
+			var ny: int = int(active_enemy.grid_pos.y + d.y)
+
+			if nx < 0 or nx >= GRID_SIZE or ny < 0 or ny >= GRID_SIZE:
+				continue
+			if _entity_at(Vector2(nx, ny)) != null:
+				continue
+			if _is_wall(Vector2(nx, ny)):
+				continue
+
+			var d_player: float = _manhattan(Vector2(nx, ny), player.grid_pos)
+			var d_player_inv: float = 20.0 - d_player
+
+			var d_other_enemies: float = 0.0
+			for oe in other_enemies:
+				d_other_enemies += _manhattan(Vector2(nx, ny), oe.grid_pos)
+
+			var score: float = (weights["aggression"] * d_player_inv) + (weights["cowardice"] * d_player) + (weights["flanking"] * d_other_enemies)
+
+			# --- Hazard tile penalty (Sprint 11) ---
+			if _is_hazard(Vector2(nx, ny)):
+				if aggression_val > 0.8:
+					score -= 1.0 # High aggression: minor penalty
+				else:
+					score -= 5.0 # Normal: strong avoidance
+
+			if score > best_score:
+				best_score = score
+				best_pos = Vector2(nx, ny)
+
+		if best_score != -INF:
+			active_enemy.move_to_grid(int(best_pos.x), int(best_pos.y))
+			active_enemy.ap -= 1
+			if audio_manager: audio_manager.play_sfx("SFX_Move")
+			_add_log(active_enemy.entity_name + " moved to (" + str(int(best_pos.x)) + ", " + str(int(best_pos.y)) + ").")
+		else:
+			active_enemy.ap = 0
+			_add_log(active_enemy.entity_name + " is stuck.")
+
+		_update_ui()
 
 # ============================================================
 # TELEMETRY
 # ============================================================
 
 func _generate_telemetry() -> void:
-	MainTelemetry.generate_telemetry(self)
+	var avg_dist: float = 0.0
+	var dist_arr: Array = telemetry["distances_to_enemies"]
+	if dist_arr.size() > 0:
+		var total: float = 0.0
+		for d in dist_arr:
+			total += d
+		avg_dist = total / dist_arr.size()
+
+	var run_data: Dictionary = {
+		"total_moves": telemetry["total_moves"],
+		"total_attacks": telemetry["total_attacks"],
+		"glitches_used": telemetry.get("glitch_attacks_used", 0) + telemetry.get("glitches_used", 0),
+		"thermal_attacks_used": telemetry.get("thermal_attacks_used", 0),
+		"cryo_attacks_used": telemetry.get("cryo_attacks_used", 0),
+		"burn_damage_dealt": telemetry["burn_damage_dealt"],
+		"turns_enemies_frozen": telemetry["turns_enemies_frozen"],
+		"avg_distance_from_enemies": avg_dist,
+		"highest_floor_reached": current_floor,
+		"result": game_over,
+	}
+
+	var json_string := JSON.stringify(run_data, "  ")
+	var file := FileAccess.open("res://run_data.json", FileAccess.WRITE)
+	if file:
+		file.store_string(json_string)
+		file.close()
+		var abs_path := ProjectSettings.globalize_path("res://run_data.json")
+		print("Telemetry saved to: " + abs_path)
+		_add_log("Saved: " + abs_path)
+	else:
+		print("ERROR: Could not save telemetry.")
+		_add_log("ERROR: Could not save telemetry.")
 
 func _run_learning_server() -> void:
-	MainTelemetry.run_learning_server(self)
+	var script_path := ProjectSettings.globalize_path("res://server_learning.py")
+	var output := []
+	var exit_code := OS.execute("python", [script_path], output, true)
+	for line in output:
+		print(line)
+		_add_log(str(line))
+	if exit_code == 0:
+		_add_log("AI weights updated successfully.")
+		_load_weights()
+		_update_ui()
+	else:
+		_add_log("ERROR: Learning server failed (exit code " + str(exit_code) + ").")
 
 # ============================================================
 # UI UPDATES
